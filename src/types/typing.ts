@@ -169,9 +169,15 @@ export interface TestConfig {
   quoteLength: QuoteLengthFilter;
 }
 
+export type UiLang = 'ja' | 'en';
+export type WritingMode = 'horizontal' | 'vertical';
+
 export interface StudySettings {
   showFurigana: boolean;
   showRomaji: boolean;
+  /** Sentences mode: 横書き (horizontal) or 縦書き (vertical-rl). */
+  writing: WritingMode;
+  lang: UiLang;
 }
 
 /** All-time keystroke counters (backspace does not undo them). */

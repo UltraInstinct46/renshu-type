@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type {
   CommittedChunk,
   QuoteItem,
   QuoteLengthFilter,
   RomajiPrefs,
   Segment,
-  SegmentView,
   SpeedSample,
   StudySettings,
   TestConfig,
@@ -21,22 +19,25 @@ import {
   appendSegments,
   backspace,
   buildSegmentViews,
+  createSession,
   currentSegmentIndex,
+  deleteWord,
   sessionMetrics,
   typeKey,
-  createSession,
 } from './utils/typingSession';
-import { getQuotePool, QUOTE_LENGTH_LABELS, WORDS } from './data/wordBanks';
+import { getQuotePool, WORDS } from './data/wordBanks';
 import { parseCustomWords } from './utils/customWords';
+import { detectLang, STRINGS } from './i18n';
+import type { Strings } from './i18n';
+import { ControlBar, Footer, Header, ImeBanner } from './components/Chrome';
+import { FocusDeck } from './components/FocusDeck';
+import { Results } from './components/Results';
 import { CustomWordsEditor } from './components/CustomWordsEditor';
 
 /* ============================================================================
  * Constants & persistence
  * ========================================================================== */
 
-const TIME_OPTIONS = [15, 30, 60] as const;
-const WORD_OPTIONS = [10, 25, 50] as const;
-const QUOTE_OPTIONS: readonly QuoteLengthFilter[] = ['all', 'short', 'medium', 'long'];
 const STORAGE_KEY = 'renshutype:settings:v2';
 const LEGACY_STORAGE_KEY = 'kanatype:settings:v2';
 const CUSTOM_WORDS_KEY = 'renshutype:custom-words:v1';
@@ -48,7 +49,15 @@ const DEFAULT_CONFIG: TestConfig = {
   amount: 30,
   quoteLength: 'all',
 };
-const DEFAULT_STUDY: StudySettings = { showFurigana: true, showRomaji: true };
+
+function defaultStudy(): StudySettings {
+  return {
+    showFurigana: true,
+    showRomaji: true,
+    writing: 'horizontal',
+    lang: detectLang(),
+  };
+}
 
 interface SavedSettings {
   config: TestConfig;
@@ -57,20 +66,21 @@ interface SavedSettings {
 }
 
 function loadSettings(): SavedSettings {
+  const baseStudy = defaultStudy();
   try {
     const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SavedSettings>;
       return {
         config: { ...DEFAULT_CONFIG, ...parsed.config },
-        study: { ...DEFAULT_STUDY, ...parsed.study },
+        study: { ...baseStudy, ...parsed.study },
         prefs: parsed.prefs ?? {},
       };
     }
   } catch {
     /* ignore corrupted storage */
   }
-  return { config: DEFAULT_CONFIG, study: DEFAULT_STUDY, prefs: {} };
+  return { config: DEFAULT_CONFIG, study: baseStudy, prefs: {} };
 }
 
 function loadCustomText(): string {
@@ -135,6 +145,7 @@ interface GameState {
 type Action =
   | { type: 'key'; key: string; time: number }
   | { type: 'backspace' }
+  | { type: 'deleteWord' }
   | { type: 'tick'; time: number }
   | { type: 'restart'; config: TestConfig; quote: QuoteItem | null; segments: Segment[] }
   | { type: 'append'; segments: Segment[] };
@@ -219,6 +230,11 @@ function reducer(state: GameState, action: Action): GameState {
       return { ...state, session: backspace(state.session) };
     }
 
+    case 'deleteWord': {
+      if (state.status !== 'running') return state;
+      return { ...state, session: deleteWord(state.session) };
+    }
+
     case 'tick': {
       if (state.status !== 'running' || state.startTime === null) return state;
       const elapsed = (action.time - state.startTime) / 1000;
@@ -279,6 +295,35 @@ function computeResult(state: GameState): TestResult {
   };
 }
 
+function formatSeconds(sec: number): string {
+  const s = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, '0')}`;
+}
+
+function describePack(config: TestConfig, quote: QuoteItem | null, customCount: number, t: Strings): string {
+  if (config.kind === 'sentences') return quote ? quote.source : t.kindSentences;
+  if (config.kind === 'custom') return t.packCustom(customCount);
+  return t.packWords(WORDS.length);
+}
+
+function describeMode(config: TestConfig, study: StudySettings, t: Strings): string {
+  if (config.kind === 'sentences') {
+    const lenMap: Record<QuoteLengthFilter, string> = {
+      all: t.lenAll,
+      short: t.lenShort,
+      medium: t.lenMedium,
+      long: t.lenLong,
+    };
+    const dir = study.writing === 'vertical' ? t.vertical : t.horizontal;
+    return `${t.kindSentences} · ${lenMap[config.quoteLength]} · ${dir}`;
+  }
+  const kindName = config.kind === 'custom' ? t.kindCustom : t.kindWords;
+  const amt = config.mode === 'time' ? t.seconds(config.amount) : t.wordsN(config.amount);
+  return `${kindName} · ${amt}`;
+}
+
 /* ============================================================================
  * App
  * ========================================================================== */
@@ -294,6 +339,8 @@ export default function App() {
   const [tabArmed, setTabArmed] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
+
+  const t = STRINGS[study.lang];
 
   const stateRef = useRef(state);
   const tabRef = useRef(false);
@@ -350,10 +397,8 @@ export default function App() {
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (editorRef.current) return; // the custom-words editor owns the keyboard
+      if (editorRef.current) return;
       const fromMobileInput = e.target === mobileInputRef.current;
-      // On Android virtual keyboards, keydown often fires with key === 'Unidentified' / keyCode 229
-      // even for English input; let the hidden input's onChange handle it instead of flagging IME.
       if (fromMobileInput && (e.key === 'Unidentified' || e.keyCode === 229)) {
         return;
       }
@@ -380,15 +425,19 @@ export default function App() {
         }
         return;
       }
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       if (e.key === 'Backspace') {
         disarm();
         e.preventDefault();
-        dispatch({ type: 'backspace' });
+        if (e.ctrlKey || e.altKey || e.metaKey) {
+          dispatch({ type: 'deleteWord' });
+        } else {
+          dispatch({ type: 'backspace' });
+        }
         return;
       }
 
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key.length !== 1) return;
       disarm();
       e.preventDefault();
@@ -402,7 +451,6 @@ export default function App() {
   const handleMobileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const el = e.currentTarget;
     const raw = el.value;
-    // Reset to sentinel space so Backspace always has a character to delete
     el.value = ' ';
     el.setSelectionRange(1, 1);
 
@@ -411,7 +459,6 @@ export default function App() {
       return;
     }
 
-    // Strip the single sentinel space (from start if appended, or end if prepended)
     const typed = raw.startsWith(' ') ? raw.slice(1) : raw.endsWith(' ') ? raw.slice(0, -1) : raw;
     if (!typed) return;
 
@@ -474,24 +521,49 @@ export default function App() {
     if (finished) mobileInputRef.current?.blur();
   }, [finished]);
 
+  const views = useMemo(
+    () => buildSegmentViews(state.session, state.prefs),
+    [state.session, state.prefs],
+  );
+
+  const isQuote = state.config.kind === 'sentences';
+  const vertical = isQuote && study.writing === 'vertical';
+  const packName = describePack(state.config, state.quote, customWords.length, t);
+  const modeLabel = describeMode(state.config, study, t);
+
+  const totalKana = state.session.reading.length || 1;
+  const progress = isTimed(state.config)
+    ? result.durationSec / state.config.amount
+    : isQuote
+      ? result.completedKana / totalKana
+      : result.completedWords / Math.max(1, state.config.amount);
+
+  const counterLabel = isTimed(state.config) ? t.remaining : t.progress;
+  const counter = isTimed(state.config)
+    ? formatSeconds(state.config.amount - result.durationSec)
+    : isQuote
+      ? `${result.completedKana}/${state.session.reading.length}`
+      : `${result.completedWords}/${state.config.amount}`;
+
   return (
-    <div className="min-h-screen bg-surface text-ink font-mono flex flex-col">
-      {imeWarning && <ImeBanner onDismiss={() => setImeWarning(false)} />}
+    <div className="flex min-h-screen flex-col text-ink">
+      {imeWarning && <ImeBanner t={t} onDismiss={() => setImeWarning(false)} />}
 
-      <div className="mx-auto w-full max-w-5xl flex-1 flex flex-col px-4 py-5 sm:px-6 sm:py-8">
-        <Header dimmed={running} />
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-4 py-5 sm:gap-6 sm:px-6 sm:py-8">
+        <Header t={t} dimmed={running} />
 
-        <ConfigBar
+        <ControlBar
+          t={t}
           config={state.config}
           study={study}
           hidden={running}
           customCount={customWords.length}
-          onEditCustom={openEditor}
           onConfig={updateConfig}
           onStudy={(patch) => setStudy((s) => ({ ...s, ...patch }))}
+          onEditCustom={openEditor}
         />
 
-        <main className="flex-1 flex flex-col justify-center py-4 sm:py-8">
+        <main className="flex flex-1 flex-col justify-center">
           {!finished && !editorOpen && (
             <input
               ref={mobileInputRef}
@@ -509,32 +581,73 @@ export default function App() {
               className="pointer-events-none fixed left-0 top-0 h-px w-px opacity-0"
             />
           )}
+
           {finished ? (
             <Results
+              t={t}
               result={result}
               samples={state.samples}
-              config={state.config}
+              packName={packName}
+              modeLabel={modeLabel}
               quote={state.quote}
+              isQuote={isQuote}
               onRestart={() => restart()}
             />
           ) : (
-            <TestView
-              state={state}
-              study={study}
-              result={result}
-              inputFocused={inputFocused}
-              onFocusInput={focusMobileInput}
-              onRestart={() => restart()}
-              onEditCustom={openEditor}
-            />
+            <div className="flex flex-col items-center">
+              <FocusDeck
+                t={t}
+                views={views}
+                study={study}
+                vertical={vertical}
+                separator={state.session.separator}
+                idle={state.status === 'idle'}
+                running={running}
+                packName={packName}
+                progress={progress}
+                counterLabel={counterLabel}
+                counter={counter}
+                kpm={result.durationSec >= 0.8 ? result.kpm : 0}
+                accuracy={result.accuracy}
+                errors={result.errors}
+                quote={state.quote}
+                empty={state.session.segments.length === 0}
+                onTap={focusMobileInput}
+                onRestart={() => restart()}
+                onEditCustom={openEditor}
+              />
+
+              {!inputFocused && state.session.segments.length > 0 && (
+                <button
+                  type="button"
+                  onClick={focusMobileInput}
+                  className="mt-3 rounded-full border border-line bg-card px-4 py-1.5 text-xs text-muted transition-colors hover:text-accent sm:hidden"
+                >
+                  {t.tapToType}
+                </button>
+              )}
+
+              {state.status === 'idle' && state.session.segments.length > 0 && (
+                <p className="mt-3 hidden text-center text-xs text-muted sm:block">
+                  {isQuote ? t.idleQuote : t.idleWords}
+                </p>
+              )}
+            </div>
           )}
         </main>
 
-        <Footer tabArmed={tabArmed} kind={state.config.kind} />
+        <Footer
+          t={t}
+          lang={study.lang}
+          onLang={(lang) => setStudy((s) => ({ ...s, lang }))}
+          tabArmed={tabArmed}
+          kind={state.config.kind}
+        />
       </div>
 
       {editorOpen && (
         <CustomWordsEditor
+          t={t}
           initialText={customText}
           onSave={saveCustomWords}
           onClose={() => {
@@ -543,769 +656,6 @@ export default function App() {
           }}
         />
       )}
-    </div>
-  );
-}
-
-/* ============================================================================
- * Chrome: header, banner, config bar, footer
- * ========================================================================== */
-
-function Header({ dimmed }: { dimmed: boolean }) {
-  return (
-    <header className={`flex items-center justify-between transition-opacity duration-300 ${dimmed ? 'opacity-40' : ''}`}>
-      <div className="flex items-center gap-3 select-none">
-        <div className="grid h-10 w-10 place-items-center rounded-lg bg-surface-alt font-jp text-xl font-bold text-accent">
-          練
-        </div>
-        <div className="leading-tight">
-          <div className="text-2xl font-bold tracking-tight text-ink">
-            renshu<span className="text-accent">type</span>
-          </div>
-          <div className="font-jp text-[10px] tracking-[0.35em] text-muted">ローマ字タイピング</div>
-        </div>
-      </div>
-      <div className="hidden text-xs text-muted sm:block">no IME required · qwerty</div>
-    </header>
-  );
-}
-
-function ImeBanner({ onDismiss }: { onDismiss: () => void }) {
-  return (
-    <div className="animate-fade-in sticky top-0 z-20 flex items-center justify-center gap-4 border-b border-accent/20 bg-surface-alt px-4 py-2 text-sm">
-      <span className="h-2 w-2 shrink-0 rounded-full bg-accent" />
-      <span className="text-ink">
-        Japanese IME detected — switch to direct input (
-        <span className="font-jp text-accent">英数</span> / <span className="text-accent">A</span>). renshutype converts
-        romaji to kana by itself.
-      </span>
-      <button
-        type="button"
-        tabIndex={-1}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={onDismiss}
-        className="rounded px-2 text-muted transition-colors hover:text-ink"
-        aria-label="Dismiss"
-      >
-        ✕
-      </button>
-    </div>
-  );
-}
-
-function ConfigButton({
-  active,
-  onClick,
-  children,
-  title,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      tabIndex={-1}
-      title={title}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={onClick}
-      className={`rounded px-2.5 py-1 transition-colors duration-150 ${
-        active ? 'text-accent' : 'text-muted hover:text-ink'
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-const Divider = () => <span className="mx-1 h-5 w-[3px] rounded bg-surface" />;
-
-function ConfigBar({
-  config,
-  study,
-  hidden,
-  customCount,
-  onEditCustom,
-  onConfig,
-  onStudy,
-}: {
-  config: TestConfig;
-  study: StudySettings;
-  hidden: boolean;
-  customCount: number;
-  onEditCustom: () => void;
-  onConfig: (patch: Partial<TestConfig>) => void;
-  onStudy: (patch: Partial<StudySettings>) => void;
-}) {
-  const amounts = config.mode === 'time' ? TIME_OPTIONS : WORD_OPTIONS;
-
-  return (
-    <div
-      className={`mt-6 flex justify-center transition-opacity duration-300 ${
-        hidden ? 'pointer-events-none opacity-0' : 'opacity-100'
-      }`}
-    >
-      <div className="flex flex-wrap items-center justify-center gap-y-1 rounded-lg bg-surface-alt px-3 py-1.5 text-sm">
-        <ConfigButton
-          active={study.showFurigana}
-          onClick={() => onStudy({ showFurigana: !study.showFurigana })}
-          title="Toggle furigana"
-        >
-          <span className="font-jp">ふりがな</span>
-        </ConfigButton>
-        <ConfigButton
-          active={study.showRomaji}
-          onClick={() => onStudy({ showRomaji: !study.showRomaji })}
-          title="Toggle romaji hint"
-        >
-          romaji
-        </ConfigButton>
-
-        <Divider />
-
-        <ConfigButton
-          active={config.kind === 'words'}
-          onClick={() => config.kind !== 'words' && onConfig({ kind: 'words' })}
-        >
-          words
-        </ConfigButton>
-        <ConfigButton
-          active={config.kind === 'sentences'}
-          onClick={() => config.kind !== 'sentences' && onConfig({ kind: 'sentences' })}
-        >
-          sentences
-        </ConfigButton>
-        <ConfigButton
-          active={config.kind === 'custom'}
-          onClick={() => config.kind !== 'custom' && onConfig({ kind: 'custom' })}
-          title="Practice your own word list"
-        >
-          custom
-        </ConfigButton>
-
-        <Divider />
-
-        {config.kind !== 'sentences' ? (
-          <>
-            <ConfigButton
-              active={config.mode === 'time'}
-              onClick={() => config.mode !== 'time' && onConfig({ mode: 'time', amount: 30 })}
-            >
-              time
-            </ConfigButton>
-            <ConfigButton
-              active={config.mode === 'words'}
-              onClick={() => config.mode !== 'words' && onConfig({ mode: 'words', amount: 25 })}
-            >
-              count
-            </ConfigButton>
-            <Divider />
-            {amounts.map((n) => (
-              <ConfigButton key={n} active={config.amount === n} onClick={() => onConfig({ amount: n })}>
-                {n}
-              </ConfigButton>
-            ))}
-            {config.kind === 'custom' && (
-              <>
-                <Divider />
-                <ConfigButton active={false} onClick={onEditCustom} title="Edit your custom words">
-                  ✎ edit <span className="text-xs opacity-70">({customCount})</span>
-                </ConfigButton>
-              </>
-            )}
-          </>
-        ) : (
-          QUOTE_OPTIONS.map((len) => (
-            <ConfigButton
-              key={len}
-              active={config.quoteLength === len}
-              onClick={() => onConfig({ quoteLength: len })}
-            >
-              {QUOTE_LENGTH_LABELS[len]}
-            </ConfigButton>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Kbd({ children, active = false }: { children: ReactNode; active?: boolean }) {
-  return (
-    <kbd
-      className={`rounded px-1.5 py-0.5 text-[11px] transition-colors ${
-        active ? 'bg-accent text-surface' : 'bg-surface-alt text-ink'
-      }`}
-    >
-      {children}
-    </kbd>
-  );
-}
-
-function Footer({ tabArmed, kind }: { tabArmed: boolean; kind: TestConfig['kind'] }) {
-  return (
-    <footer className="hidden flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-muted sm:flex">
-      <span>
-        <Kbd active={tabArmed}>tab</Kbd> + <Kbd>enter</Kbd> — {kind === 'sentences' ? 'next quote' : 'restart'}
-      </span>
-      <span>
-        <Kbd>esc</Kbd> — restart
-      </span>
-      <span>
-        <Kbd>backspace</Kbd> — fix typo
-      </span>
-      {kind !== 'sentences' && (
-        <span>
-          <Kbd>space</Kbd> — next word
-        </span>
-      )}
-    </footer>
-  );
-}
-
-/* ============================================================================
- * Test view: multi-word stream & quotes
- * ========================================================================== */
-
-function TestView({
-  state,
-  study,
-  result,
-  inputFocused,
-  onFocusInput,
-  onRestart,
-  onEditCustom,
-}: {
-  state: GameState;
-  study: StudySettings;
-  result: TestResult;
-  inputFocused: boolean;
-  onFocusInput: () => void;
-  onRestart: () => void;
-  onEditCustom: () => void;
-}) {
-  const views = useMemo(
-    () => buildSegmentViews(state.session, state.prefs),
-    [state.session, state.prefs],
-  );
-  const running = state.status === 'running';
-  const elapsed = result.durationSec;
-
-  if (state.session.segments.length === 0) {
-    return (
-      <div className="animate-fade-in flex flex-col items-center gap-4 py-16 text-center">
-        <div className="font-jp text-4xl text-muted/60">練習</div>
-        <div className="text-muted">your custom word list is empty</div>
-        <button
-          type="button"
-          tabIndex={-1}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={onEditCustom}
-          className="rounded-lg bg-surface-alt px-5 py-2.5 text-ink transition-colors hover:text-accent"
-        >
-          + add your words
-        </button>
-      </div>
-    );
-  }
-
-  const counter =
-    state.config.kind !== 'sentences'
-      ? state.config.mode === 'time'
-        ? String(Math.max(0, Math.ceil(state.config.amount - elapsed)))
-        : `${result.completedWords}/${state.config.amount}`
-      : `${result.completedKana}/${state.session.reading.length}`;
-
-  return (
-    <div className="flex flex-col items-center">
-      {/* live stats */}
-      <div className="mb-6 flex h-10 w-full items-baseline gap-6 text-muted">
-        <span className="text-3xl font-medium text-accent tabular-nums">{counter}</span>
-        <div
-          className={`flex items-baseline gap-5 text-sm transition-opacity duration-300 ${
-            running ? 'opacity-100' : 'opacity-0'
-          }`}
-        >
-          <LiveStat label="kpm" value={elapsed >= 1 ? Math.round(result.kpm) : '–'} />
-          <LiveStat label="wpm" value={elapsed >= 1 ? result.wpm.toFixed(0) : '–'} />
-          <LiveStat label="acc" value={`${Math.floor(result.accuracy)}%`} />
-          <LiveStat label="err" value={result.errors} />
-        </div>
-      </div>
-
-      <WordStream
-        views={views}
-        study={study}
-        isQuote={state.config.kind === 'sentences'}
-        idle={state.status === 'idle'}
-        onTap={onFocusInput}
-      />
-
-      {!inputFocused && (
-        <button
-          type="button"
-          onClick={onFocusInput}
-          className="mt-4 rounded-full bg-surface-alt px-4 py-1.5 text-xs text-muted transition-colors hover:text-accent sm:hidden"
-        >
-          tap here to open keyboard
-        </button>
-      )}
-
-      {state.quote && (
-        <div className="mt-6 flex flex-col items-center gap-1 text-center">
-          <div className="font-jp text-sm text-accent/80">— {state.quote.source}</div>
-          <div className="text-xs text-muted/75 italic">{state.quote.meaning}</div>
-        </div>
-      )}
-
-      <button
-        type="button"
-        tabIndex={-1}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={onRestart}
-        title={state.config.kind === 'sentences' ? 'Next quote (esc)' : 'Restart test (esc)'}
-        className="mt-8 rounded-lg p-3 text-muted transition-colors hover:bg-surface-alt hover:text-ink"
-      >
-        <RestartIcon />
-      </button>
-
-      {state.status === 'idle' && (
-        <p className="mt-2 text-xs text-muted/80">
-          {state.config.kind !== 'sentences'
-            ? 'type the romaji and press space between words — typos can be backspaced'
-            : 'type the quote in romaji — typos can be backspaced'}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function LiveStat({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <span>
-      <span className="text-lg text-ink tabular-nums">{value}</span> <span className="text-xs">{label}</span>
-    </span>
-  );
-}
-
-function WordStream({
-  views,
-  study,
-  isQuote,
-  idle,
-  onTap,
-}: {
-  views: SegmentView[];
-  study: StudySettings;
-  isQuote: boolean;
-  idle: boolean;
-  onTap: () => void;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const segRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const caretCharRef = useRef<HTMLSpanElement | null>(null);
-  const [scrollY, setScrollY] = useState(0);
-  const [caret, setCaret] = useState({ x: 0, y: 0, h: 0, visible: false });
-
-  const currentSeg = views.find((v) => v.status === 'current');
-  const currentIdx = currentSeg?.index ?? -1;
-
-  const measure = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    // 1. Scroll so the active row stays on row 1 or 2 (Monkeytype 3-line window)
-    let nextScroll = 0;
-    const segEl = currentIdx >= 0 ? segRefs.current[currentIdx] : null;
-    if (!isQuote && segEl) {
-      const rowH = segEl.offsetHeight + 12; // segment height + gap-y-3 (12px)
-      if (segEl.offsetTop > rowH * 1.1) {
-        nextScroll = Math.max(0, segEl.offsetTop - rowH);
-      }
-    }
-    setScrollY((prev) => (prev === nextScroll ? prev : nextScroll));
-
-    // 2. Position caret on the active romaji character
-    const target = caretCharRef.current;
-    if (!target) {
-      setCaret((c) => (c.visible ? { ...c, visible: false } : c));
-      return;
-    }
-    const cRect = container.getBoundingClientRect();
-    const tRect = target.getBoundingClientRect();
-    const x = tRect.left - cRect.left;
-    const y = tRect.top - cRect.top;
-    const h = tRect.height || 16;
-    setCaret((prev) =>
-      Math.abs(prev.x - x) < 0.5 && Math.abs(prev.y - y) < 0.5 && Math.abs(prev.h - h) < 0.5 && prev.visible
-        ? prev
-        : { x, y, h, visible: true },
-    );
-  }, [currentIdx, isQuote]);
-
-  useLayoutEffect(() => {
-    measure();
-  }, [measure, views, study, scrollY]);
-
-  useEffect(() => {
-    window.addEventListener('resize', measure);
-    void document.fonts?.ready.then(measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [measure]);
-
-  // Show 3 rows in words mode; full quote in sentences mode
-  const maxHeightClass = isQuote
-    ? 'max-w-3xl mx-auto'
-    : study.showFurigana
-      ? 'max-h-[216px] sm:max-h-[240px] overflow-hidden'
-      : 'max-h-[168px] sm:max-h-[192px] overflow-hidden';
-
-  return (
-    <div onClick={onTap} className={`relative w-full cursor-text ${maxHeightClass}`}>
-      <div
-        ref={containerRef}
-        className={`relative flex flex-wrap items-start transition-transform duration-150 ease-out ${
-          isQuote ? 'justify-start gap-x-1 gap-y-2.5 sm:gap-y-3' : 'justify-start gap-x-3 gap-y-2.5 sm:gap-x-4 sm:gap-y-3'
-        }`}
-        style={scrollY > 0 ? { transform: `translateY(-${scrollY}px)` } : undefined}
-      >
-        {views.map((seg) => (
-          <SegmentBlock
-            key={seg.index}
-            seg={seg}
-            study={study}
-            segRef={(el) => {
-              segRefs.current[seg.index] = el;
-            }}
-            caretCharRef={seg.status === 'current' ? caretCharRef : undefined}
-          />
-        ))}
-
-        {caret.visible && (
-          <span
-            aria-hidden
-            className={`pointer-events-none absolute left-0 top-0 w-[2px] rounded-full bg-accent transition-transform duration-75 ease-out ${
-              idle ? 'animate-caret-blink' : ''
-            }`}
-            style={{
-              transform: `translate(${caret.x - 1}px, ${caret.y + caret.h * 0.05}px)`,
-              height: caret.h * 0.9,
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SegmentBlock({
-  seg,
-  study,
-  segRef,
-  caretCharRef,
-}: {
-  seg: SegmentView;
-  study: StudySettings;
-  segRef: (el: HTMLDivElement | null) => void;
-  caretCharRef?: React.MutableRefObject<HTMLSpanElement | null>;
-}) {
-  const textColor =
-    seg.status === 'done'
-      ? seg.hasError
-        ? 'text-ink/80'
-        : 'text-ink'
-      : seg.status === 'current'
-        ? 'text-ink'
-        : 'text-muted';
-
-  const visibleRomaji = study.showRomaji
-    ? seg.romaji
-    : seg.romaji.filter((r) => r.state !== 'pending');
-  const caretIdx = seg.caretAt === null ? null : Math.min(seg.caretAt, visibleRomaji.length);
-
-  return (
-    <div
-      ref={segRef}
-      className={`inline-flex flex-col items-center select-none ${
-        seg.hasError ? 'border-b-2 border-danger/70 pb-0.5' : 'pb-1'
-      }`}
-    >
-      {/* Tier 1: Kanji / Kana (uniform h-8 / sm:h-9 across all segments) */}
-      {seg.kanaOnly ? (
-        <div className="flex h-8 items-center justify-center font-jp text-xl leading-none sm:h-9 sm:text-2xl">
-          {seg.kana.map((k, i) => (
-            <span key={i} className={kanaColorClass(k.state)}>
-              {k.ch}
-            </span>
-          ))}
-        </div>
-      ) : (
-        <div className={`flex h-8 items-center justify-center font-jp text-xl leading-none transition-colors sm:h-9 sm:text-2xl ${textColor}`}>
-          {seg.text}
-        </div>
-      )}
-
-      {/* Tier 2: Furigana (uniform h-4 when enabled, even for kana-only segments) */}
-      {study.showFurigana && (
-        <div className="flex h-4 items-center justify-center font-jp text-[11px] leading-none">
-          {!seg.kanaOnly &&
-            seg.kana.map((k, i) => (
-              <span key={i} className={kanaColorClass(k.state)}>
-                {k.ch}
-              </span>
-            ))}
-        </div>
-      )}
-
-      {/* Tier 3: Romaji (uniform h-5) */}
-      <div className="flex h-5 items-center justify-center font-mono text-xs leading-none tracking-normal">
-        {visibleRomaji.map((r, i) => {
-          const isCaretTarget = caretIdx === i;
-          return (
-            <span
-              key={i}
-              ref={isCaretTarget ? caretCharRef : undefined}
-              className={romajiColorClass(r.state, study.showRomaji)}
-            >
-              {r.ch}
-            </span>
-          );
-        })}
-        {caretIdx === visibleRomaji.length && (
-          <span ref={caretCharRef} className="inline-block h-3.5 w-0">
-            &#8203;
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function kanaColorClass(state: SegmentView['kana'][number]['state']): string {
-  switch (state) {
-    case 'done':
-      return 'text-accent';
-    case 'error':
-      return 'text-danger';
-    case 'missed':
-      return 'text-muted/45';
-    case 'active':
-      return 'text-ink border-b border-accent';
-    case 'pending':
-      return 'text-muted';
-  }
-}
-
-function romajiColorClass(state: SegmentView['romaji'][number]['state'], showHint: boolean): string {
-  switch (state) {
-    case 'correct':
-      return 'text-ink';
-    case 'error':
-      return 'text-danger';
-    case 'extra':
-      return 'text-danger/80 underline decoration-danger/60';
-    case 'missed':
-      return 'text-muted/45';
-    case 'pending':
-      return showHint ? 'text-muted' : 'text-transparent';
-  }
-}
-
-function RestartIcon() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M3 12a9 9 0 1 0 3-6.7" />
-      <path d="M3 4v5h5" />
-    </svg>
-  );
-}
-
-/* ============================================================================
- * Results
- * ========================================================================== */
-
-function Results({
-  result,
-  samples,
-  config,
-  quote,
-  onRestart,
-}: {
-  result: TestResult;
-  samples: SpeedSample[];
-  config: TestConfig;
-  quote: QuoteItem | null;
-  onRestart: () => void;
-}) {
-  const modeLabel =
-    config.kind !== 'sentences'
-      ? `${config.kind} · ${config.mode} ${config.amount}${config.mode === 'time' ? 's' : ''}`
-      : `sentences · ${QUOTE_LENGTH_LABELS[config.quoteLength]}`;
-
-  return (
-    <div className="animate-fade-in flex flex-col gap-10">
-      <div className="grid items-center gap-8 md:grid-cols-[auto_1fr]">
-        <div className="flex gap-10 md:flex-col md:gap-6">
-          <BigStat label="kpm" value={Math.round(result.kpm)} />
-          <BigStat label="wpm" value={result.wpm.toFixed(1)} />
-        </div>
-        <SpeedChart samples={samples} />
-      </div>
-
-      <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-6">
-        <SmallStat label="accuracy" value={`${result.accuracy.toFixed(1)}%`} />
-        <SmallStat label="errors" value={result.errors} danger={result.errors > 0} />
-        <SmallStat label="raw kpm" value={Math.round(result.rawKpm)} />
-        <SmallStat
-          label="keys"
-          value={
-            <>
-              {result.correctKeys}
-              <span className="text-muted">/</span>
-              <span className="text-danger">{result.errors}</span>
-            </>
-          }
-        />
-        <SmallStat label="time" value={`${result.durationSec.toFixed(1)}s`} />
-        <SmallStat
-          label={config.kind === 'sentences' ? 'kana' : 'words · kana'}
-          value={config.kind === 'sentences' ? result.completedKana : `${result.completedWords} · ${result.completedKana}`}
-        />
-      </div>
-
-      {quote && (
-        <div className="rounded-lg bg-surface-alt/60 px-5 py-3 text-center">
-          <div className="font-jp text-sm text-accent">— {quote.source}</div>
-          <div className="mt-1 text-xs text-muted italic">{quote.meaning}</div>
-        </div>
-      )}
-
-      <div className="flex flex-col items-center gap-3">
-        <div className="text-xs text-muted">{modeLabel}</div>
-        <button
-          type="button"
-          tabIndex={-1}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={onRestart}
-          className="flex items-center gap-2 rounded-lg px-5 py-2.5 text-muted transition-colors hover:bg-surface-alt hover:text-ink"
-        >
-          <RestartIcon /> {config.kind === 'sentences' ? 'next quote' : 'next test'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function BigStat({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <div className="text-2xl text-muted">{label}</div>
-      <div className="text-6xl leading-none text-accent tabular-nums">{value}</div>
-    </div>
-  );
-}
-
-function SmallStat({ label, value, danger = false }: { label: string; value: ReactNode; danger?: boolean }) {
-  return (
-    <div>
-      <div className="text-sm text-muted">{label}</div>
-      <div className={`text-2xl tabular-nums ${danger ? 'text-danger' : 'text-accent'}`}>{value}</div>
-    </div>
-  );
-}
-
-function niceMax(v: number): number {
-  if (v <= 0) return 100;
-  const step = v > 400 ? 100 : 50;
-  return Math.ceil((v * 1.1) / step) * step;
-}
-
-function SpeedChart({ samples }: { samples: SpeedSample[] }) {
-  if (samples.length < 2) {
-    return (
-      <div className="grid h-48 place-items-center rounded-lg bg-surface-alt/50 text-sm text-muted">
-        not enough data for a chart
-      </div>
-    );
-  }
-
-  const W = 640;
-  const H = 200;
-  const pad = { l: 40, r: 12, t: 12, b: 26 };
-
-  const raw = samples.map((s, i) => {
-    const prev = i === 0 ? { second: 0, correct: 0, errors: 0 } : samples[i - 1];
-    const dt = s.second - prev.second || 1;
-    return {
-      t: s.second,
-      inst: ((s.correct - prev.correct) / dt) * 60,
-      avg: (s.correct / s.second) * 60,
-      err: s.errors - prev.errors,
-    };
-  });
-  const points = raw.map((p, i) => {
-    const win = raw.slice(Math.max(0, i - 1), i + 2);
-    return { ...p, inst: win.reduce((n, q) => n + q.inst, 0) / win.length };
-  });
-
-  const maxT = points[points.length - 1].t;
-  const maxY = niceMax(Math.max(...points.map((p) => Math.max(p.inst, p.avg))));
-  const x = (t: number) => pad.l + (t / maxT) * (W - pad.l - pad.r);
-  const y = (v: number) => pad.t + (1 - v / maxY) * (H - pad.t - pad.b);
-  const line = (key: 'inst' | 'avg') => points.map((p) => `${x(p.t).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ');
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(maxY * f));
-
-  return (
-    <div className="w-full">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Speed over time">
-        {ticks.map((v) => (
-          <g key={v}>
-            <line x1={pad.l} x2={W - pad.r} y1={y(v)} y2={y(v)} stroke="#646669" strokeOpacity={0.18} />
-            <text x={pad.l - 8} y={y(v) + 4} textAnchor="end" fontSize="10" fill="#646669">
-              {v}
-            </text>
-          </g>
-        ))}
-        {points
-          .filter((_, i) => points.length <= 20 || i % Math.ceil(points.length / 10) === 0)
-          .map((p) => (
-            <text key={p.t} x={x(p.t)} y={H - 8} textAnchor="middle" fontSize="10" fill="#646669">
-              {Math.round(p.t)}
-            </text>
-          ))}
-        <polyline points={line('inst')} fill="none" stroke="#646669" strokeWidth={2} strokeLinejoin="round" />
-        <polyline points={line('avg')} fill="none" stroke="#e2b714" strokeWidth={2.5} strokeLinejoin="round" />
-        {points
-          .filter((p) => p.err > 0)
-          .map((p) => (
-            <g key={`e${p.t}`} stroke="#ca4754" strokeWidth={2}>
-              <line x1={x(p.t) - 4} x2={x(p.t) + 4} y1={y(p.inst) - 4} y2={y(p.inst) + 4} />
-              <line x1={x(p.t) - 4} x2={x(p.t) + 4} y1={y(p.inst) + 4} y2={y(p.inst) - 4} />
-            </g>
-          ))}
-      </svg>
-      <div className="mt-1 flex justify-end gap-4 text-xs text-muted">
-        <span>
-          <span className="text-accent">━</span> avg kpm
-        </span>
-        <span>
-          <span className="text-muted">━</span> kpm / sec
-        </span>
-        <span>
-          <span className="text-danger">✕</span> errors
-        </span>
-      </div>
     </div>
   );
 }

@@ -1,30 +1,27 @@
 @import "tailwindcss";
 
 @theme {
-  --color-surface: #323437;
-  --color-surface-alt: #2c2e31;
-  --color-accent: #e2b714;
-  --color-muted: #646669;
-  --color-ink: #d1d0c5;
-  --color-danger: #ca4754;
+  /* 墨 sumi ink surfaces, 和紙 washi text, 朱 shu vermilion accent */
+  --color-surface: #131416;
+  --color-card: #1b1c1f;
+  --color-surface-alt: #222327;
+  --color-line: #2e2f34;
+  --color-accent: #e8603c;
+  --color-muted: #7a7872;
+  --color-ink: #ece7dd;
+  --color-danger: #ff5a6e;
+  --color-matcha: #9cc37a;
 
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --font-jp: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  --font-jp: "Zen Kaku Gothic New", "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  --font-mincho: "Shippori Mincho B1", "Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", serif;
 
-  --animate-caret-blink: caret-blink 1s ease-in-out infinite;
-  --animate-err: err-flash 0.35s ease-out;
-  --animate-err-bg: err-bg 0.35s ease-out;
+  --animate-caret-blink: caret-blink 1.1s ease-in-out infinite;
   --animate-fade-in: fade-in 0.3s ease-out;
 
   @keyframes caret-blink {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0; }
-  }
-  @keyframes err-flash {
-    from { color: #ca4754; background-color: rgb(202 71 84 / 0.25); }
-  }
-  @keyframes err-bg {
-    from { background-color: rgb(202 71 84 / 0.4); }
+    50% { opacity: 0.15; }
   }
   @keyframes fade-in {
     from { opacity: 0; transform: translateY(6px); }
@@ -33,17 +30,39 @@
 
 html,
 body {
-  background: var(--color-surface);
+  background-color: var(--color-surface);
   color: var(--color-ink);
 }
 
 body {
   margin: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-jp);
   -webkit-font-smoothing: antialiased;
+  /* faint dot grid — notebook / hardware panel texture */
+  background-image: radial-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px);
+  background-size: 22px 22px;
 }
 
 ::selection {
   background: var(--color-accent);
   color: var(--color-surface);
+}
+
+/* Soft elevation for the Focus Deck & results card */
+.deck-shadow {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.04),
+    0 1px 2px rgb(0 0 0 / 0.4),
+    0 28px 60px -32px rgb(0 0 0 / 0.85);
+}
+
+/* Vertical stage (縦書き) */
+.tategaki {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
 }

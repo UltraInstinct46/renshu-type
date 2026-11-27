@@ -244,6 +244,24 @@ export function backspace(session: TypingSession): TypingSession {
   };
 }
 
+/**
+ * Ctrl/Alt + Backspace: deletes everything typed in the current word. If the
+ * cursor is at the start of a word (only the previous word's separator space
+ * remains), the whole previous word is deleted instead — like Monkeytype/editors.
+ */
+export function deleteWord(session: TypingSession): TypingSession {
+  const { entries } = session;
+  if (entries.length === 0) return session;
+  const target = entries[entries.length - 1].segment;
+  let i = entries.length;
+  while (i > 0 && entries[i - 1].segment === target) i--;
+  return {
+    ...session,
+    parser: entries[i].before,
+    entries: entries.slice(0, i),
+  };
+}
+
 /* ========================================================================== */
 /*  View builder                                                               */
 /* ========================================================================== */

@@ -3,7 +3,7 @@
  * (Node ≥ 22.18 strips TypeScript types natively.)
  */
 import { createParser, defaultRomaji, getGuide, processKey, romajiToKana, typeString } from '../src/utils/romajiEngine.ts';
-import { backspace, buildSegmentViews, createSession, typeKey } from '../src/utils/typingSession.ts';
+import { backspace, buildSegmentViews, createSession, deleteWord, typeKey } from '../src/utils/typingSession.ts';
 import { QUOTES, WORDS } from '../src/data/wordBanks.ts';
 import { materializeReadings, parseCustomWords } from '../src/utils/customWords.ts';
 
@@ -153,6 +153,26 @@ accepts('ふぁいる', 'fairu');
   check('session: completed after skipping last word', ses.parser.completed);
   ses = backspace(ses);
   check('session: backspace un-skips last word', !ses.parser.completed);
+}
+
+// typingSession: ctrl+backspace deletes the current word, then the previous one
+{
+  let ses = createSession(
+    [
+      { text: '学校', reading: 'がっこう' },
+      { text: '時間', reading: 'じかん' },
+    ],
+    true,
+  );
+  for (const k of 'gakkou ji') ses = typeKey(ses, k).session;
+  ses = deleteWord(ses);
+  let views = buildSegmentViews(ses);
+  check('deleteWord: clears current word', views[1].status === 'current' && views[1].caretAt === 0);
+  check('deleteWord: keeps previous word', views[0].status === 'done');
+  ses = deleteWord(ses);
+  views = buildSegmentViews(ses);
+  check('deleteWord: at word start deletes previous word', views[0].status === 'current' && views[0].caretAt === 0);
+  check('deleteWord: empty session no-op', deleteWord(ses) === ses);
 }
 
 // typingSession: quote (no space separator)
