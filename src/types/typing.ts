@@ -153,7 +153,7 @@ export interface SegmentView {
 /*  Test configuration & stats                                         */
 /* ------------------------------------------------------------------ */
 
-export type TestKind = 'words' | 'sentences';
+export type TestKind = 'words' | 'sentences' | 'custom';
 export type TestMode = 'time' | 'words';
 export type TestStatus = 'idle' | 'running' | 'finished';
 

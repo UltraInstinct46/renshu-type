@@ -138,6 +138,21 @@ export function normalizeReading(reading: string): string {
   return out;
 }
 
+/**
+ * Characters in a reading that the engine has no romaji for (e.g. kanji or
+ * rare katakana like ヷ). An empty array means the reading is fully typeable.
+ */
+export function unsupportedChars(reading: string): string[] {
+  const bad = new Set<string>();
+  for (const ch of normalizeReading(reading)) {
+    if (ch === 'っ' || ch === 'ん' || SINGLE[ch]) continue;
+    const code = ch.charCodeAt(0);
+    if (code >= 0x21 && code <= 0x7e) continue; // printable ASCII types as itself
+    bad.add(ch);
+  }
+  return [...bad];
+}
+
 /** Normalize a physical key (handles accidental full-width input & Caps Lock). */
 export function normalizeKey(key: string): string {
   if (key.length !== 1) return key;

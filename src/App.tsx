@@ -14,6 +14,7 @@ import type {
   TestStats,
   TestStatus,
   TypingSession,
+  WordItem,
 } from './types/typing';
 import { normalizeKey } from './utils/romajiEngine';
 import {
@@ -26,6 +27,8 @@ import {
   createSession,
 } from './utils/typingSession';
 import { getQuotePool, QUOTE_LENGTH_LABELS, WORDS } from './data/wordBanks';
+import { parseCustomWords } from './utils/customWords';
+import { CustomWordsEditor } from './components/CustomWordsEditor';
 
 /* ============================================================================
  * Constants & persistence
@@ -34,7 +37,9 @@ import { getQuotePool, QUOTE_LENGTH_LABELS, WORDS } from './data/wordBanks';
 const TIME_OPTIONS = [15, 30, 60] as const;
 const WORD_OPTIONS = [10, 25, 50] as const;
 const QUOTE_OPTIONS: readonly QuoteLengthFilter[] = ['all', 'short', 'medium', 'long'];
-const STORAGE_KEY = 'kanatype:settings:v2';
+const STORAGE_KEY = 'renshutype:settings:v2';
+const LEGACY_STORAGE_KEY = 'kanatype:settings:v2';
+const CUSTOM_WORDS_KEY = 'renshutype:custom-words:v1';
 const TIME_MODE_BATCH = 50;
 
 const DEFAULT_CONFIG: TestConfig = {
@@ -53,7 +58,7 @@ interface SavedSettings {
 
 function loadSettings(): SavedSettings {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SavedSettings>;
       return {
@@ -66,6 +71,14 @@ function loadSettings(): SavedSettings {
     /* ignore corrupted storage */
   }
   return { config: DEFAULT_CONFIG, study: DEFAULT_STUDY, prefs: {} };
+}
+
+function loadCustomText(): string {
+  try {
+    return localStorage.getItem(CUSTOM_WORDS_KEY) ?? '';
+  } catch {
+    return '';
+  }
 }
 
 /* ============================================================================
@@ -81,13 +94,14 @@ function shuffle<T>(items: readonly T[]): T[] {
   return a;
 }
 
-function buildWordSegments(count: number, lastText?: string): Segment[] {
+function buildWordSegments(pool: readonly WordItem[], count: number, lastText?: string): Segment[] {
+  if (pool.length === 0) return [];
   const out: Segment[] = [];
   let prev = lastText;
   while (out.length < count) {
-    for (const w of shuffle(WORDS)) {
+    for (const w of shuffle(pool)) {
       if (out.length >= count) break;
-      if (prev && w.text === prev && WORDS.length > 1) continue;
+      if (prev && w.text === prev && pool.length > 1) continue;
       out.push({ text: w.text, reading: w.reading });
       prev = w.text;
     }
@@ -136,7 +150,7 @@ function createGame(
   return {
     config,
     status: 'idle',
-    session: createSession(segments, config.kind === 'words'),
+    session: createSession(segments, config.kind !== 'sentences'),
     quote,
     prefs,
     stats: EMPTY_STATS,
@@ -147,14 +161,19 @@ function createGame(
   };
 }
 
-function initGame(saved: SavedSettings): GameState {
+const wordPoolFor = (config: TestConfig, custom: readonly WordItem[]) =>
+  config.kind === 'custom' ? custom : WORDS;
+
+const isTimed = (config: TestConfig) => config.kind !== 'sentences' && config.mode === 'time';
+
+function initGame(saved: SavedSettings, custom: readonly WordItem[]): GameState {
   const { config, prefs } = saved;
   if (config.kind === 'sentences') {
     const q = pickQuote(config.quoteLength);
     return createGame(config, q.segments, q, prefs);
   }
   const count = config.mode === 'words' ? config.amount : TIME_MODE_BATCH;
-  return createGame(config, buildWordSegments(count), null, prefs);
+  return createGame(config, buildWordSegments(wordPoolFor(config, custom), count), null, prefs);
 }
 
 function fillSamples(samples: SpeedSample[], stats: TestStats, elapsed: number): SpeedSample[] {
@@ -203,7 +222,7 @@ function reducer(state: GameState, action: Action): GameState {
     case 'tick': {
       if (state.status !== 'running' || state.startTime === null) return state;
       const elapsed = (action.time - state.startTime) / 1000;
-      if (state.config.kind === 'words' && state.config.mode === 'time' && elapsed >= state.config.amount) {
+      if (isTimed(state.config) && elapsed >= state.config.amount) {
         return finish(state, state.startTime + state.config.amount * 1000);
       }
       return { ...state, now: action.time, samples: fillSamples(state.samples, state.stats, elapsed) };
@@ -213,7 +232,7 @@ function reducer(state: GameState, action: Action): GameState {
       if (state.status === 'finished') return state;
       const startTime = state.startTime ?? action.time;
       const base: GameState = { ...state, status: 'running', startTime, now: action.time };
-      if (base.config.kind === 'words' && base.config.mode === 'time' && (action.time - startTime) / 1000 >= base.config.amount) {
+      if (isTimed(base.config) && (action.time - startTime) / 1000 >= base.config.amount) {
         return finish(base, startTime + base.config.amount * 1000);
       }
 
@@ -267,14 +286,21 @@ function computeResult(state: GameState): TestResult {
 export default function App() {
   const [saved] = useState(loadSettings);
   const [study, setStudy] = useState<StudySettings>(saved.study);
-  const [state, dispatch] = useReducer(reducer, saved, initGame);
+  const [customText, setCustomText] = useState(loadCustomText);
+  const customWords = useMemo(() => parseCustomWords(customText).words, [customText]);
+  const customRef = useRef(customWords);
+  const [state, dispatch] = useReducer(reducer, saved, (s) => initGame(s, customWords));
   const [imeWarning, setImeWarning] = useState(false);
   const [tabArmed, setTabArmed] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const stateRef = useRef(state);
   const tabRef = useRef(false);
+  const editorRef = useRef(false);
   useEffect(() => {
     stateRef.current = state;
+    customRef.current = customWords;
+    editorRef.current = editorOpen;
   });
 
   const restart = useCallback((nextConfig?: TestConfig) => {
@@ -288,8 +314,22 @@ export default function App() {
       return;
     }
     const count = cfg.mode === 'words' ? cfg.amount : TIME_MODE_BATCH;
-    dispatch({ type: 'restart', config: cfg, quote: null, segments: buildWordSegments(count) });
+    const pool = wordPoolFor(cfg, customRef.current);
+    dispatch({ type: 'restart', config: cfg, quote: null, segments: buildWordSegments(pool, count) });
   }, []);
+
+  const saveCustomWords = (text: string) => {
+    customRef.current = parseCustomWords(text).words;
+    editorRef.current = false;
+    setCustomText(text);
+    setEditorOpen(false);
+    restart({ ...stateRef.current.config, kind: 'custom' });
+  };
+
+  const openEditor = () => {
+    editorRef.current = true;
+    setEditorOpen(true);
+  };
 
   /* ---- keyboard ---------------------------------------------------------- */
   useEffect(() => {
@@ -300,6 +340,7 @@ export default function App() {
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (editorRef.current) return; // the custom-words editor owns the keyboard
       if (e.isComposing || e.key === 'Process' || e.keyCode === 229) {
         setImeWarning(true);
         e.preventDefault();
@@ -351,14 +392,15 @@ export default function App() {
 
   /* ---- endless queue for time mode --------------------------------------- */
   useEffect(() => {
-    if (state.config.kind !== 'words' || state.config.mode !== 'time') return;
+    if (!isTimed(state.config)) return;
     const cur = currentSegmentIndex(state.session);
     const total = state.session.segments.length;
-    if (total - cur < 25) {
+    const pool = wordPoolFor(state.config, customWords);
+    if (pool.length > 0 && total - cur < 25) {
       const lastText = state.session.segments[total - 1]?.text;
-      dispatch({ type: 'append', segments: buildWordSegments(TIME_MODE_BATCH, lastText) });
+      dispatch({ type: 'append', segments: buildWordSegments(pool, TIME_MODE_BATCH, lastText) });
     }
-  }, [state.config, state.session]);
+  }, [state.config, state.session, customWords]);
 
   /* ---- persistence ------------------------------------------------------- */
   useEffect(() => {
@@ -369,7 +411,18 @@ export default function App() {
     }
   }, [state.config, state.prefs, study]);
 
-  const updateConfig = (patch: Partial<TestConfig>) => restart({ ...state.config, ...patch });
+  useEffect(() => {
+    try {
+      localStorage.setItem(CUSTOM_WORDS_KEY, customText);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [customText]);
+
+  const updateConfig = (patch: Partial<TestConfig>) => {
+    restart({ ...state.config, ...patch });
+    if (patch.kind === 'custom' && customWords.length === 0) openEditor();
+  };
 
   const running = state.status === 'running';
   const finished = state.status === 'finished';
@@ -386,6 +439,8 @@ export default function App() {
           config={state.config}
           study={study}
           hidden={running}
+          customCount={customWords.length}
+          onEditCustom={openEditor}
           onConfig={updateConfig}
           onStudy={(patch) => setStudy((s) => ({ ...s, ...patch }))}
         />
@@ -400,12 +455,29 @@ export default function App() {
               onRestart={() => restart()}
             />
           ) : (
-            <TestView state={state} study={study} result={result} onRestart={() => restart()} />
+            <TestView
+              state={state}
+              study={study}
+              result={result}
+              onRestart={() => restart()}
+              onEditCustom={openEditor}
+            />
           )}
         </main>
 
         <Footer tabArmed={tabArmed} kind={state.config.kind} />
       </div>
+
+      {editorOpen && (
+        <CustomWordsEditor
+          initialText={customText}
+          onSave={saveCustomWords}
+          onClose={() => {
+            editorRef.current = false;
+            setEditorOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -419,11 +491,11 @@ function Header({ dimmed }: { dimmed: boolean }) {
     <header className={`flex items-center justify-between transition-opacity duration-300 ${dimmed ? 'opacity-40' : ''}`}>
       <div className="flex items-center gap-3 select-none">
         <div className="grid h-10 w-10 place-items-center rounded-lg bg-surface-alt font-jp text-xl font-bold text-accent">
-          か
+          練
         </div>
         <div className="leading-tight">
           <div className="text-2xl font-bold tracking-tight text-ink">
-            kana<span className="text-accent">type</span>
+            renshu<span className="text-accent">type</span>
           </div>
           <div className="font-jp text-[10px] tracking-[0.35em] text-muted">ローマ字タイピング</div>
         </div>
@@ -439,7 +511,7 @@ function ImeBanner({ onDismiss }: { onDismiss: () => void }) {
       <span className="h-2 w-2 shrink-0 rounded-full bg-accent" />
       <span className="text-ink">
         Japanese IME detected — switch to direct input (
-        <span className="font-jp text-accent">英数</span> / <span className="text-accent">A</span>). kanatype converts
+        <span className="font-jp text-accent">英数</span> / <span className="text-accent">A</span>). renshutype converts
         romaji to kana by itself.
       </span>
       <button
@@ -489,12 +561,16 @@ function ConfigBar({
   config,
   study,
   hidden,
+  customCount,
+  onEditCustom,
   onConfig,
   onStudy,
 }: {
   config: TestConfig;
   study: StudySettings;
   hidden: boolean;
+  customCount: number;
+  onEditCustom: () => void;
   onConfig: (patch: Partial<TestConfig>) => void;
   onStudy: (patch: Partial<StudySettings>) => void;
 }) {
@@ -536,10 +612,17 @@ function ConfigBar({
         >
           sentences
         </ConfigButton>
+        <ConfigButton
+          active={config.kind === 'custom'}
+          onClick={() => config.kind !== 'custom' && onConfig({ kind: 'custom' })}
+          title="Practice your own word list"
+        >
+          custom
+        </ConfigButton>
 
         <Divider />
 
-        {config.kind === 'words' ? (
+        {config.kind !== 'sentences' ? (
           <>
             <ConfigButton
               active={config.mode === 'time'}
@@ -559,6 +642,14 @@ function ConfigBar({
                 {n}
               </ConfigButton>
             ))}
+            {config.kind === 'custom' && (
+              <>
+                <Divider />
+                <ConfigButton active={false} onClick={onEditCustom} title="Edit your custom words">
+                  ✎ edit <span className="text-xs opacity-70">({customCount})</span>
+                </ConfigButton>
+              </>
+            )}
           </>
         ) : (
           QUOTE_OPTIONS.map((len) => (
@@ -600,7 +691,7 @@ function Footer({ tabArmed, kind }: { tabArmed: boolean; kind: TestConfig['kind'
       <span>
         <Kbd>backspace</Kbd> — fix typo
       </span>
-      {kind === 'words' && (
+      {kind !== 'sentences' && (
         <span>
           <Kbd>space</Kbd> — next word
         </span>
@@ -618,11 +709,13 @@ function TestView({
   study,
   result,
   onRestart,
+  onEditCustom,
 }: {
   state: GameState;
   study: StudySettings;
   result: TestResult;
   onRestart: () => void;
+  onEditCustom: () => void;
 }) {
   const views = useMemo(
     () => buildSegmentViews(state.session, state.prefs),
@@ -631,8 +724,26 @@ function TestView({
   const running = state.status === 'running';
   const elapsed = result.durationSec;
 
+  if (state.session.segments.length === 0) {
+    return (
+      <div className="animate-fade-in flex flex-col items-center gap-4 py-16 text-center">
+        <div className="font-jp text-4xl text-muted/60">練習</div>
+        <div className="text-muted">your custom word list is empty</div>
+        <button
+          type="button"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={onEditCustom}
+          className="rounded-lg bg-surface-alt px-5 py-2.5 text-ink transition-colors hover:text-accent"
+        >
+          + add your words
+        </button>
+      </div>
+    );
+  }
+
   const counter =
-    state.config.kind === 'words'
+    state.config.kind !== 'sentences'
       ? state.config.mode === 'time'
         ? String(Math.max(0, Math.ceil(state.config.amount - elapsed)))
         : `${result.completedWords}/${state.config.amount}`
@@ -682,7 +793,7 @@ function TestView({
 
       {state.status === 'idle' && (
         <p className="mt-2 text-xs text-muted/80">
-          {state.config.kind === 'words'
+          {state.config.kind !== 'sentences'
             ? 'type the romaji and press space between words — typos can be backspaced'
             : 'type the quote in romaji — typos can be backspaced'}
         </p>
@@ -956,8 +1067,8 @@ function Results({
   onRestart: () => void;
 }) {
   const modeLabel =
-    config.kind === 'words'
-      ? `words · ${config.mode} ${config.amount}${config.mode === 'time' ? 's' : ''}`
+    config.kind !== 'sentences'
+      ? `${config.kind} · ${config.mode} ${config.amount}${config.mode === 'time' ? 's' : ''}`
       : `sentences · ${QUOTE_LENGTH_LABELS[config.quoteLength]}`;
 
   return (

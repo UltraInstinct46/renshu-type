@@ -5,6 +5,7 @@
 import { createParser, defaultRomaji, getGuide, processKey, typeString } from '../src/utils/romajiEngine.ts';
 import { backspace, buildSegmentViews, createSession, typeKey } from '../src/utils/typingSession.ts';
 import { QUOTES, WORDS } from '../src/data/wordBanks.ts';
+import { parseCustomWords } from '../src/utils/customWords.ts';
 
 let failed = 0;
 let passed = 0;
@@ -178,6 +179,34 @@ for (const q of QUOTES) {
   const romaji = defaultRomaji(reading);
   const { state, errors } = typeString(reading, romaji);
   check(`quote ${q.id}`, state.completed && errors === 0);
+}
+
+// custom word parsing
+{
+  const { words, issues } = parseCustomWords(
+    [
+      '# comment',
+      '猫|ねこ|cat',
+      '食べる たべる to eat',
+      'ありがとう',
+      'コーヒー,コーヒー,coffee, drink',
+      '漢字',
+      '本|ほん語',
+      'ヷ',
+      '猫|ねこ',
+      '',
+    ].join('\n'),
+  );
+  check('custom: 4 valid words', words.length === 4, `(${words.length})`);
+  check('custom: pipe format', words[0]?.text === '猫' && words[0]?.reading === 'ねこ' && words[0]?.meaning === 'cat');
+  check('custom: space format', words[1]?.reading === 'たべる' && words[1]?.meaning === 'to eat');
+  check('custom: kana-only', words[2]?.text === 'ありがとう' && words[2]?.reading === 'ありがとう');
+  check('custom: comma meaning joined', words[3]?.meaning === 'coffee, drink');
+  check('custom: 3 issues (no reading, kanji reading, untypeable)', issues.length === 3, JSON.stringify(issues));
+  for (const w of words) {
+    const { state, errors } = typeString(w.reading, defaultRomaji(w.reading));
+    check(`custom typeable ${w.text}`, state.completed && errors === 0);
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed  (words: ${WORDS.length}, quotes: ${QUOTES.length})`);
