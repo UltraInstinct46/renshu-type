@@ -293,15 +293,25 @@ export default function App() {
   const [imeWarning, setImeWarning] = useState(false);
   const [tabArmed, setTabArmed] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
 
   const stateRef = useRef(state);
   const tabRef = useRef(false);
   const editorRef = useRef(false);
+  const mobileInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     stateRef.current = state;
     customRef.current = customWords;
     editorRef.current = editorOpen;
   });
+
+  const focusMobileInput = useCallback(() => {
+    const el = mobileInputRef.current;
+    if (!el) return;
+    el.value = ' ';
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(1, 1);
+  }, []);
 
   const restart = useCallback((nextConfig?: TestConfig) => {
     const cfg = nextConfig ?? stateRef.current.config;
@@ -341,6 +351,12 @@ export default function App() {
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (editorRef.current) return; // the custom-words editor owns the keyboard
+      const fromMobileInput = e.target === mobileInputRef.current;
+      // On Android virtual keyboards, keydown often fires with key === 'Unidentified' / keyCode 229
+      // even for English input; let the hidden input's onChange handle it instead of flagging IME.
+      if (fromMobileInput && (e.key === 'Unidentified' || e.keyCode === 229)) {
+        return;
+      }
       if (e.isComposing || e.key === 'Process' || e.keyCode === 229) {
         setImeWarning(true);
         e.preventDefault();
@@ -382,6 +398,32 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [restart]);
+
+  const handleMobileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const el = e.currentTarget;
+    const raw = el.value;
+    // Reset to sentinel space so Backspace always has a character to delete
+    el.value = ' ';
+    el.setSelectionRange(1, 1);
+
+    if (raw.length === 0) {
+      dispatch({ type: 'backspace' });
+      return;
+    }
+
+    // Strip the single sentinel space (from start if appended, or end if prepended)
+    const typed = raw.startsWith(' ') ? raw.slice(1) : raw.endsWith(' ') ? raw.slice(0, -1) : raw;
+    if (!typed) return;
+
+    const now = performance.now();
+    for (const ch of typed) {
+      if (/[^\x00-\x7f]/.test(ch)) {
+        setImeWarning(true);
+        return;
+      }
+      dispatch({ type: 'key', key: normalizeKey(ch), time: now });
+    }
+  };
 
   /* ---- timer ------------------------------------------------------------- */
   useEffect(() => {
@@ -428,11 +470,15 @@ export default function App() {
   const finished = state.status === 'finished';
   const result = computeResult(state);
 
+  useEffect(() => {
+    if (finished) mobileInputRef.current?.blur();
+  }, [finished]);
+
   return (
     <div className="min-h-screen bg-surface text-ink font-mono flex flex-col">
       {imeWarning && <ImeBanner onDismiss={() => setImeWarning(false)} />}
 
-      <div className="mx-auto w-full max-w-5xl flex-1 flex flex-col px-6 py-8">
+      <div className="mx-auto w-full max-w-5xl flex-1 flex flex-col px-4 py-5 sm:px-6 sm:py-8">
         <Header dimmed={running} />
 
         <ConfigBar
@@ -445,7 +491,24 @@ export default function App() {
           onStudy={(patch) => setStudy((s) => ({ ...s, ...patch }))}
         />
 
-        <main className="flex-1 flex flex-col justify-center py-8">
+        <main className="flex-1 flex flex-col justify-center py-4 sm:py-8">
+          {!finished && !editorOpen && (
+            <input
+              ref={mobileInputRef}
+              type="text"
+              defaultValue=" "
+              onChange={handleMobileChange}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="done"
+              aria-label="Type romaji here"
+              className="pointer-events-none fixed left-0 top-0 h-px w-px opacity-0"
+            />
+          )}
           {finished ? (
             <Results
               result={result}
@@ -459,6 +522,8 @@ export default function App() {
               state={state}
               study={study}
               result={result}
+              inputFocused={inputFocused}
+              onFocusInput={focusMobileInput}
               onRestart={() => restart()}
               onEditCustom={openEditor}
             />
@@ -681,7 +746,7 @@ function Kbd({ children, active = false }: { children: ReactNode; active?: boole
 
 function Footer({ tabArmed, kind }: { tabArmed: boolean; kind: TestConfig['kind'] }) {
   return (
-    <footer className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-muted">
+    <footer className="hidden flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-muted sm:flex">
       <span>
         <Kbd active={tabArmed}>tab</Kbd> + <Kbd>enter</Kbd> — {kind === 'sentences' ? 'next quote' : 'restart'}
       </span>
@@ -708,12 +773,16 @@ function TestView({
   state,
   study,
   result,
+  inputFocused,
+  onFocusInput,
   onRestart,
   onEditCustom,
 }: {
   state: GameState;
   study: StudySettings;
   result: TestResult;
+  inputFocused: boolean;
+  onFocusInput: () => void;
   onRestart: () => void;
   onEditCustom: () => void;
 }) {
@@ -771,7 +840,18 @@ function TestView({
         study={study}
         isQuote={state.config.kind === 'sentences'}
         idle={state.status === 'idle'}
+        onTap={onFocusInput}
       />
+
+      {!inputFocused && (
+        <button
+          type="button"
+          onClick={onFocusInput}
+          className="mt-4 rounded-full bg-surface-alt px-4 py-1.5 text-xs text-muted transition-colors hover:text-accent sm:hidden"
+        >
+          tap here to open keyboard
+        </button>
+      )}
 
       {state.quote && (
         <div className="mt-6 flex flex-col items-center gap-1 text-center">
@@ -815,11 +895,13 @@ function WordStream({
   study,
   isQuote,
   idle,
+  onTap,
 }: {
   views: SegmentView[];
   study: StudySettings;
   isQuote: boolean;
   idle: boolean;
+  onTap: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const segRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -877,15 +959,15 @@ function WordStream({
   const maxHeightClass = isQuote
     ? 'max-w-3xl mx-auto'
     : study.showFurigana
-      ? 'max-h-[240px] overflow-hidden'
-      : 'max-h-[192px] overflow-hidden';
+      ? 'max-h-[216px] sm:max-h-[240px] overflow-hidden'
+      : 'max-h-[168px] sm:max-h-[192px] overflow-hidden';
 
   return (
-    <div className={`relative w-full ${maxHeightClass}`}>
+    <div onClick={onTap} className={`relative w-full cursor-text ${maxHeightClass}`}>
       <div
         ref={containerRef}
         className={`relative flex flex-wrap items-start transition-transform duration-150 ease-out ${
-          isQuote ? 'justify-start gap-x-1 gap-y-3' : 'justify-start gap-x-4 gap-y-3'
+          isQuote ? 'justify-start gap-x-1 gap-y-2.5 sm:gap-y-3' : 'justify-start gap-x-3 gap-y-2.5 sm:gap-x-4 sm:gap-y-3'
         }`}
         style={scrollY > 0 ? { transform: `translateY(-${scrollY}px)` } : undefined}
       >
@@ -950,9 +1032,9 @@ function SegmentBlock({
         seg.hasError ? 'border-b-2 border-danger/70 pb-0.5' : 'pb-1'
       }`}
     >
-      {/* Tier 1: Kanji / Kana (uniform h-9 across all segments) */}
+      {/* Tier 1: Kanji / Kana (uniform h-8 / sm:h-9 across all segments) */}
       {seg.kanaOnly ? (
-        <div className="flex h-9 items-center justify-center font-jp text-2xl leading-none">
+        <div className="flex h-8 items-center justify-center font-jp text-xl leading-none sm:h-9 sm:text-2xl">
           {seg.kana.map((k, i) => (
             <span key={i} className={kanaColorClass(k.state)}>
               {k.ch}
@@ -960,7 +1042,7 @@ function SegmentBlock({
           ))}
         </div>
       ) : (
-        <div className={`flex h-9 items-center justify-center font-jp text-2xl leading-none transition-colors ${textColor}`}>
+        <div className={`flex h-8 items-center justify-center font-jp text-xl leading-none transition-colors sm:h-9 sm:text-2xl ${textColor}`}>
           {seg.text}
         </div>
       )}
