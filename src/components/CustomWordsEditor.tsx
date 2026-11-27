@@ -34,7 +34,7 @@ export function CustomWordsEditor({
   const needsDict = initialParse.unresolved.length > 0;
 
   useEffect(() => {
-    if (!needsDict || tokenizer || dictStatus === 'loading' || dictStatus === 'error') return;
+    if (!needsDict || tokenizer) return;
     let cancelled = false;
     setDictStatus('loading');
     loadTokenizer()
@@ -50,7 +50,7 @@ export function CustomWordsEditor({
     return () => {
       cancelled = true;
     };
-  }, [needsDict, tokenizer, dictStatus]);
+  }, [needsDict, tokenizer]);
 
   const lookup = useMemo(() => {
     if (!tokenizer || initialParse.unresolved.length === 0) return undefined;
@@ -122,17 +122,17 @@ export function CustomWordsEditor({
           </button>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[1fr_320px]">
+        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto md:grid-cols-[1fr_320px]">
           <textarea
             autoFocus
             spellCheck={false}
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder={PLACEHOLDER}
-            className="h-80 w-full resize-none rounded-lg bg-surface-alt p-4 font-jp text-sm leading-relaxed text-ink outline-none ring-accent/40 placeholder:text-muted/50 focus:ring-1"
+            className="h-52 w-full resize-none rounded-lg bg-surface-alt p-4 font-jp text-sm leading-relaxed text-ink outline-none ring-accent/40 placeholder:text-muted/50 focus:ring-1 md:h-80"
           />
 
-          <div className="flex h-80 min-h-0 flex-col rounded-lg bg-surface-alt/60 p-3 text-sm">
+          <div className="flex h-48 min-h-0 flex-col rounded-lg bg-surface-alt/60 p-3 text-sm md:h-80">
             <div className="mb-2 flex items-baseline justify-between gap-2">
               <span className="text-muted">preview</span>
               {dictStatus === 'loading' ? (
