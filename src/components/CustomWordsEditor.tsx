@@ -1,15 +1,19 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
-import { parseCustomWords } from '../utils/customWords';
+import { materializeReadings, parseCustomWords } from '../utils/customWords';
+import { loadTokenizer, readingOf } from '../utils/kanjiReader';
+import type { KanjiTokenizer } from '../utils/kanjiReader';
 import { defaultRomaji } from '../utils/romajiEngine';
 
-const PLACEHOLDER = `猫|ねこ|cat
-図書館|としょかん|library
-食べる たべる to eat
-ありがとう
-コーヒー`;
+const PLACEHOLDER = `猫
+図書館
+ラーメン屋
+猫|neko|cat
+ありがとう`;
 
 const PREVIEW_LIMIT = 60;
+
+type DictStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export function CustomWordsEditor({
   initialText,
@@ -21,9 +25,49 @@ export function CustomWordsEditor({
   onClose: () => void;
 }) {
   const [text, setText] = useState(initialText);
+  const [dictStatus, setDictStatus] = useState<DictStatus>('idle');
+  const [tokenizer, setTokenizer] = useState<KanjiTokenizer | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const parsed = useMemo(() => parseCustomWords(text), [text]);
-  const { words, issues } = parsed;
+
+  // First pass without lookup to see if any kanji-only lines need the dictionary
+  const initialParse = useMemo(() => parseCustomWords(text), [text]);
+  const needsDict = initialParse.unresolved.length > 0;
+
+  useEffect(() => {
+    if (!needsDict || tokenizer || dictStatus === 'loading' || dictStatus === 'error') return;
+    let cancelled = false;
+    setDictStatus('loading');
+    loadTokenizer()
+      .then((tok) => {
+        if (cancelled) return;
+        setTokenizer(tok);
+        setDictStatus('ready');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDictStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsDict, tokenizer, dictStatus]);
+
+  const lookup = useMemo(() => {
+    if (!tokenizer || initialParse.unresolved.length === 0) return undefined;
+    const map = new Map<string, string>();
+    for (const word of initialParse.unresolved) {
+      map.set(word, readingOf(tokenizer, word) ?? '');
+    }
+    return map;
+  }, [tokenizer, initialParse.unresolved]);
+
+  const parsed = useMemo(() => (lookup ? parseCustomWords(text, lookup) : initialParse), [text, lookup, initialParse]);
+  const { words, issues, unresolved } = parsed;
+
+  const handleSave = () => {
+    const finalized = lookup ? materializeReadings(text, lookup) : text;
+    onSave(finalized);
+  };
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -31,7 +75,7 @@ export function CustomWordsEditor({
       onClose();
     } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      onSave(text);
+      handleSave();
     }
   };
 
@@ -63,9 +107,9 @@ export function CustomWordsEditor({
               custom <span className="text-accent">words</span>
             </h2>
             <p className="mt-1 text-xs text-muted">
-              one per line · <span className="font-jp text-ink">言葉|ことば|meaning</span> · kana-only words need no
-              reading · separators: <span className="text-ink">| tab , space</span> · <span className="text-ink">#</span>{' '}
-              for comments
+              one per line · kanji alone (<span className="font-jp text-ink">猫</span>) auto-reads · or{' '}
+              <span className="font-jp text-ink">言葉|ことば|meaning</span> /{' '}
+              <span className="font-jp text-ink">猫|neko</span> · <span className="text-ink">#</span> comments
             </p>
           </div>
           <button
@@ -78,7 +122,7 @@ export function CustomWordsEditor({
           </button>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[1fr_300px]">
+        <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[1fr_320px]">
           <textarea
             autoFocus
             spellCheck={false}
@@ -89,20 +133,34 @@ export function CustomWordsEditor({
           />
 
           <div className="flex h-80 min-h-0 flex-col rounded-lg bg-surface-alt/60 p-3 text-sm">
-            <div className="mb-2 flex items-baseline justify-between">
+            <div className="mb-2 flex items-baseline justify-between gap-2">
               <span className="text-muted">preview</span>
-              <span className={words.length ? 'text-accent' : 'text-muted'}>
-                {words.length} word{words.length === 1 ? '' : 's'} ready
-              </span>
+              {dictStatus === 'loading' ? (
+                <span className="text-xs text-accent">loading dictionary…</span>
+              ) : (
+                <span className={words.length ? 'text-accent' : 'text-muted'}>
+                  {words.length} word{words.length === 1 ? '' : 's'} ready
+                </span>
+              )}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-              {words.length === 0 && issues.length === 0 && (
+              {words.length === 0 && issues.length === 0 && unresolved.length === 0 && (
                 <p className="mt-6 text-center text-xs text-muted/70">type or paste words on the left</p>
+              )}
+              {dictStatus === 'error' && unresolved.length > 0 && (
+                <div className="mb-2 rounded bg-danger/15 p-2 text-xs text-danger">
+                  couldn&apos;t load dictionary — add readings manually like <span className="font-jp">猫|ねこ</span>
+                </div>
               )}
               {words.slice(0, PREVIEW_LIMIT).map((w) => (
                 <div key={w.id} className="flex items-baseline gap-2 border-b border-white/5 py-1">
                   <span className="font-jp text-ink">{w.text}</span>
                   {w.text !== w.reading && <span className="font-jp text-xs text-muted">{w.reading}</span>}
+                  {w.autoReading && (
+                    <span className="rounded bg-surface px-1 text-[10px] text-accent/80" title="auto-detected reading">
+                      auto
+                    </span>
+                  )}
                   <span className="ml-auto truncate font-mono text-xs text-muted/80">{defaultRomaji(w.reading)}</span>
                 </div>
               ))}
@@ -153,10 +211,11 @@ export function CustomWordsEditor({
           </button>
           <button
             type="button"
-            onClick={() => onSave(text)}
-            className="rounded-lg bg-accent px-4 py-2 font-medium text-surface transition-opacity hover:opacity-90"
+            disabled={dictStatus === 'loading'}
+            onClick={handleSave}
+            className="rounded-lg bg-accent px-4 py-2 font-medium text-surface transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            save &amp; start
+            {dictStatus === 'loading' ? 'loading…' : 'save & start'}
           </button>
         </div>
       </div>

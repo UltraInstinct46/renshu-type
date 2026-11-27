@@ -2,10 +2,10 @@
  * Engine & session regression tests — run with:  node scripts/engine-test.ts
  * (Node ≥ 22.18 strips TypeScript types natively.)
  */
-import { createParser, defaultRomaji, getGuide, processKey, typeString } from '../src/utils/romajiEngine.ts';
+import { createParser, defaultRomaji, getGuide, processKey, romajiToKana, typeString } from '../src/utils/romajiEngine.ts';
 import { backspace, buildSegmentViews, createSession, typeKey } from '../src/utils/typingSession.ts';
 import { QUOTES, WORDS } from '../src/data/wordBanks.ts';
-import { parseCustomWords } from '../src/utils/customWords.ts';
+import { materializeReadings, parseCustomWords } from '../src/utils/customWords.ts';
 
 let failed = 0;
 let passed = 0;
@@ -181,29 +181,50 @@ for (const q of QUOTES) {
   check(`quote ${q.id}`, state.completed && errors === 0);
 }
 
-// custom word parsing
+// romajiToKana
 {
-  const { words, issues } = parseCustomWords(
-    [
-      '# comment',
-      '猫|ねこ|cat',
-      '食べる たべる to eat',
-      'ありがとう',
-      'コーヒー,コーヒー,coffee, drink',
-      '漢字',
-      '本|ほん語',
-      'ヷ',
-      '猫|ねこ',
-      '',
-    ].join('\n'),
-  );
-  check('custom: 4 valid words', words.length === 4, `(${words.length})`);
-  check('custom: pipe format', words[0]?.text === '猫' && words[0]?.reading === 'ねこ' && words[0]?.meaning === 'cat');
-  check('custom: space format', words[1]?.reading === 'たべる' && words[1]?.meaning === 'to eat');
-  check('custom: kana-only', words[2]?.text === 'ありがとう' && words[2]?.reading === 'ありがとう');
-  check('custom: comma meaning joined', words[3]?.meaning === 'coffee, drink');
-  check('custom: 3 issues (no reading, kanji reading, untypeable)', issues.length === 3, JSON.stringify(issues));
-  for (const w of words) {
+  check('romajiToKana: neko', romajiToKana('neko') === 'ねこ');
+  check('romajiToKana: toshokan', romajiToKana('toshokan') === 'としょかん');
+  check('romajiToKana: konnichiwa', romajiToKana('konnichiwa') === 'こんにちわ');
+  check('romajiToKana: kannna', romajiToKana('kannna') === 'かんな');
+  check('romajiToKana: matcha', romajiToKana('matcha') === 'まっちゃ');
+  check('romajiToKana: tōkyō', romajiToKana('tōkyō') === 'とうきょう');
+  check('romajiToKana: invalid', romajiToKana('123') === null);
+}
+
+// custom word parsing (with romaji readings & dictionary lookup)
+{
+  const input = [
+    '# comment',
+    '猫|ねこ|cat',
+    '食べる たべる to eat',
+    'ありがとう',
+    'コーヒー,コーヒー,coffee, drink',
+    '犬|inu|dog',
+    '漢字',
+    '本|ほん語',
+    'ヷ',
+    '猫|ねこ',
+    '',
+  ].join('\n');
+
+  const first = parseCustomWords(input);
+  check('custom: 5 valid without lookup', first.words.length === 5, `(${first.words.length})`);
+  check('custom: 1 unresolved kanji (漢字)', first.unresolved.length === 1 && first.unresolved[0] === '漢字');
+  check('custom: pipe format', first.words[0]?.text === '猫' && first.words[0]?.reading === 'ねこ' && first.words[0]?.meaning === 'cat');
+  check('custom: space format', first.words[1]?.reading === 'たべる' && first.words[1]?.meaning === 'to eat');
+  check('custom: kana-only', first.words[2]?.text === 'ありがとう' && first.words[2]?.reading === 'ありがとう');
+  check('custom: comma meaning joined', first.words[3]?.meaning === 'coffee, drink');
+  check('custom: romaji reading (犬|inu)', first.words[4]?.text === '犬' && first.words[4]?.reading === 'いぬ');
+  check('custom: 2 issues (kanji reading, untypeable)', first.issues.length === 2, JSON.stringify(first.issues));
+
+  const lookup = new Map([['漢字', 'かんじ']]);
+  const second = parseCustomWords(input, lookup);
+  check('custom: 6 valid with lookup', second.words.length === 6, `(${second.words.length})`);
+  check('custom: autoReading flag', second.words[5]?.reading === 'かんじ' && second.words[5]?.autoReading === true);
+  check('custom: materializeReadings', materializeReadings('漢字\n猫|ねこ', lookup) === '漢字|かんじ\n猫|ねこ');
+
+  for (const w of second.words) {
     const { state, errors } = typeString(w.reading, defaultRomaji(w.reading));
     check(`custom typeable ${w.text}`, state.completed && errors === 0);
   }

@@ -13,6 +13,8 @@ export interface Segment {
 export interface WordItem extends Segment {
   id: string;
   meaning: string;
+  /** Custom words: reading was looked up from the dictionary, not typed by the user. */
+  autoReading?: boolean;
 }
 
 export type QuoteLength = 'short' | 'medium' | 'long';

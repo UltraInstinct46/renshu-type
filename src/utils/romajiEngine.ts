@@ -153,6 +153,96 @@ export function unsupportedChars(reading: string): string[] {
   return [...bad];
 }
 
+/* ========================================================================== */
+/*  Romaji → Kana (for readings written in romaji, e.g. 猫|neko)              */
+/* ========================================================================== */
+
+let reverseTable: Map<string, string> | null = null;
+
+function getReverseTable(): Map<string, string> {
+  if (reverseTable) return reverseTable;
+  const map = new Map<string, string>();
+  const add = (kana: string, spellings: readonly string[]) => {
+    for (const r of spellings) if (/^[a-z]+$/.test(r) && !map.has(r)) map.set(r, kana);
+  };
+  for (const [kana, spellings] of Object.entries(SINGLE)) add(kana, spellings);
+  for (const [kana, spellings] of Object.entries(COMBO)) add(kana, spellings);
+  for (const r of SOKUON_EXPLICIT) map.set(r, 'っ');
+  map.set('xn', 'ん');
+  reverseTable = map;
+  return map;
+}
+
+const MACRONS: Record<string, string> = {
+  ā: 'aa', ī: 'ii', ū: 'uu', ē: 'ee', ō: 'ou',
+  â: 'aa', î: 'ii', û: 'uu', ê: 'ee', ô: 'ou',
+};
+
+/**
+ * Converts a romaji spelling to hiragana ("toshokan" → としょかん,
+ * "konnichiwa" → こんにちわ, "tōkyō" → とうきょう). Returns null when the
+ * input contains something that isn't valid romaji.
+ */
+export function romajiToKana(input: string): string | null {
+  const s = input.toLowerCase().replace(/[āīūēōâîûêô]/g, (m) => MACRONS[m]);
+  if (!s) return null;
+  const table = getReverseTable();
+  let out = '';
+  let i = 0;
+
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '-') {
+      out += 'ー';
+      i++;
+      continue;
+    }
+    if (c === 'n') {
+      const n1 = s[i + 1];
+      const n2 = s[i + 2];
+      if (n1 === "'") {
+        out += 'ん';
+        i += 2;
+        continue;
+      }
+      if (n1 === 'n') {
+        // "konnichiwa": the second n starts に; "kannna" / "kann": nn is ん
+        out += 'ん';
+        i += n2 && /[aiueoy]/.test(n2) ? 1 : 2;
+        continue;
+      }
+      if (!n1 || !/[aiueoy]/.test(n1)) {
+        out += 'ん';
+        i++;
+        continue;
+      }
+    }
+    if (/[bcdfghjkmpqrstvwz]/.test(c) && s[i + 1] === c) {
+      out += 'っ';
+      i++;
+      continue;
+    }
+    if (c === 't' && s.startsWith('ch', i + 1)) {
+      out += 'っ'; // matcha → まっちゃ
+      i++;
+      continue;
+    }
+    let matched = false;
+    for (let len = 4; len >= 1; len--) {
+      if (i + len > s.length) continue;
+      const kana = table.get(s.slice(i, i + len));
+      if (kana) {
+        out += kana;
+        i += len;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) return null;
+  }
+  return out;
+}
+
 /** Normalize a physical key (handles accidental full-width input & Caps Lock). */
 export function normalizeKey(key: string): string {
   if (key.length !== 1) return key;
